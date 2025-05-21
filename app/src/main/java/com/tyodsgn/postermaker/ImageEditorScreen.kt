@@ -1,5 +1,14 @@
 package com.tyodsgn.postermaker
 
+import android.content.Context
+import android.content.Intent
+import android.content.Intent.createChooser
+import android.graphics.Bitmap
+import android.graphics.Picture
+import android.media.MediaScannerConnection
+import android.net.Uri
+import android.os.Build
+import android.os.Environment
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.ExperimentalSharedTransitionApi
 import androidx.compose.animation.SharedTransitionLayout
@@ -58,6 +67,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.draw.drawWithCache
+import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
@@ -70,13 +81,17 @@ import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.draw
+import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.graphics.vector.DefaultStrokeLineMiter
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInRoot
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.res.painterResource
@@ -93,15 +108,21 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.unit.toSize
+import androidx.core.content.ContextCompat.startActivity
 import androidx.navigation.NavController
 import androidx.navigation.compose.rememberNavController
 import com.tyodsgn.postermaker.ui.theme.fontHeadingFlex
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.suspendCancellableCoroutine
 import org.w3c.dom.Text
+import java.io.File
 import java.util.UUID
+import kotlin.coroutines.resume
 import kotlin.math.cos
 import kotlin.math.sin
+
 
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalSharedTransitionApi::class)
@@ -109,6 +130,24 @@ import kotlin.math.sin
 fun ImageEditorScreen(
     modiferTopAppBar: Modifier = Modifier, navController: NavController, imageName: String
 ){
+    // Composable to image
+    val context = LocalContext.current
+    val coroutineScope = rememberCoroutineScope()
+    val picture = remember { Picture() }
+
+
+    // This logic should live in your ViewModel - trigger a side effect to invoke URI sharing.
+    // checks permissions granted, and then saves the bitmap from a Picture that is already capturing content
+    // and shares it with the default share sheet.
+    fun shareBitmapFromComposable() {
+        coroutineScope.launch(Dispatchers.IO) {
+            val bitmap = createBitmapFromPicture(picture)
+            val uri = bitmap.saveToDisk(context)
+            shareBitmap(context, uri)
+        }
+    }
+    // Composable to image End
+
     var isStickerSelectorOpen by remember { mutableStateOf(false) }
 
     var isTextEditorOpen by remember { mutableStateOf(false) }
@@ -185,6 +224,27 @@ fun ImageEditorScreen(
             // Canvas
             Box(
                 Modifier
+//                    .drawWithCache {
+//                        // Example that shows how to redirect rendering to an Android Picture and then
+//                        // draw the picture into the original destination
+//                        val width = this.size.width.toInt()
+//                        val height = this.size.height.toInt()
+//                        onDrawWithContent {
+//                            val pictureCanvas =
+//                                androidx.compose.ui.graphics.Canvas(
+//                                    picture.beginRecording(
+//                                        width,
+//                                        height
+//                                    )
+//                                )
+//                            draw(this, this.layoutDirection, pictureCanvas, this.size) {
+//                                this@onDrawWithContent.drawContent()
+//                            }
+//                            picture.endRecording()
+//
+//                            drawIntoCanvas { canvas -> canvas.nativeCanvas.drawPicture(picture) }
+//                        }
+//                    }
                     .clip(
                         RoundedCornerShape(24.dp)
                     )
@@ -193,7 +253,6 @@ fun ImageEditorScreen(
                     .onGloballyPositioned { layoutCoordinates ->
                         canvasSize = layoutCoordinates.size.toSize()
                     }
-
 
             ) {
                 SharedTransitionLayout(
@@ -363,7 +422,7 @@ fun ImageEditorScreen(
                 PrimaryButtonView(
                     label = "Share",
                     onClickButton = {
-
+                        shareBitmapFromComposable()
                     }
                 )
             }
@@ -885,7 +944,8 @@ fun DraggableTextView(
                         )
                     },
                 )
-            }
+            },
+        contentAlignment = Alignment.Center
     ){
         TextStickerView(text = textState.text, screenWidth = screenWidth)
     }
@@ -1152,6 +1212,65 @@ fun OverlayTextView(){
 
 }
 
+//Compose to Image
+
+private fun createBitmapFromPicture(picture: Picture): Bitmap {
+    val bitmap = Bitmap.createBitmap(
+        picture.width,
+        picture.height,
+        Bitmap.Config.ARGB_8888
+    )
+
+    val canvas = android.graphics.Canvas(bitmap)
+    canvas.drawColor(android.graphics.Color.WHITE)
+    canvas.drawPicture(picture)
+    return bitmap
+}
+
+private suspend fun Bitmap.saveToDisk(context: Context): Uri {
+    val file = File(
+        Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES),
+        "screenshot-${System.currentTimeMillis()}.png"
+    )
+
+    file.writeBitmap(this, Bitmap.CompressFormat.PNG, 100)
+
+    return scanFilePath(context, file.path) ?: throw Exception("File could not be saved")
+}
+
+
+private suspend fun scanFilePath(context: Context, filePath: String): Uri? {
+    return suspendCancellableCoroutine { continuation ->
+        MediaScannerConnection.scanFile(
+            context,
+            arrayOf(filePath),
+            arrayOf("image/png")
+        ) { _, scannedUri ->
+            if (scannedUri == null) {
+                continuation.cancel(Exception("File $filePath could not be scanned"))
+            } else {
+                continuation.resume(scannedUri)
+            }
+        }
+    }
+}
+
+private fun File.writeBitmap(bitmap: Bitmap, format: Bitmap.CompressFormat, quality: Int) {
+    outputStream().use { out ->
+        bitmap.compress(format, quality, out)
+        out.flush()
+    }
+}
+
+private fun shareBitmap(context: Context, uri: Uri) {
+    val intent = Intent(Intent.ACTION_SEND).apply {
+        type = "image/png"
+        putExtra(Intent.EXTRA_STREAM, uri)
+        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+    }
+    startActivity(context, createChooser(intent, "Share your image"), null)
+}
+
 data class TextStickerState(
     val id: String = UUID.randomUUID().toString(),
     val text: String,
@@ -1179,6 +1298,15 @@ data class ProductStickerState(
 )
 
 val listOfSticker = listOf(
+    "stickerSale01",
+    "stickerSale02",
+    "stickerSale03",
+    "stickerSale04",
+    "stickerSale05",
+    "stickerSale06",
+    "stickerSale07",
+    "stickerSale08",
+    "stickerSale09",
     "stickercelebrate",
     "stickerconfused",
     "stickercool",
@@ -1199,7 +1327,16 @@ val mapSticker = mapOf(
     "stickerpeace" to R.drawable.stickerpeace,
     "stickersurprised" to R.drawable.stickersurprised,
     "stickerthumbsup" to R.drawable.stickerthumbsup,
-    "stickerthanks" to R.drawable.stickerthanks
+    "stickerthanks" to R.drawable.stickerthanks,
+    "stickerSale01" to R.drawable.stickersale01,
+    "stickerSale02" to R.drawable.stickersale02,
+    "stickerSale03" to R.drawable.stickersale03,
+    "stickerSale04" to R.drawable.stickersale04,
+    "stickerSale05" to R.drawable.stickersale05,
+    "stickerSale06" to R.drawable.stickersale06,
+    "stickerSale07" to R.drawable.stickersale07,
+    "stickerSale08" to R.drawable.stickersale08,
+    "stickerSale09" to R.drawable.stickersale09
 )
 
 @Preview(showBackground = false)
